@@ -53,7 +53,8 @@ class GW_Performance_Engine {
         // 12. "Borrowed" Pro Features: Speculation Rules & Hardening
         add_action( 'wp_head', array( $this, 'inject_speculation_rules' ), 2 );
         add_action( 'init', array( $this, 'harden_security' ) );
-        add_filter( 'xmlrpc_enabled', '__return_false' );
+        add_filter( 'xmlrpc_enabled', array( $this, 'filter_xmlrpc_for_jetpack' ) );
+        add_filter( 'xmlrpc_methods', array( $this, 'disable_xmlrpc_pingback' ) );
     }
 
     /**
@@ -486,6 +487,30 @@ class GW_Performance_Engine {
             </form>
         </div>
         <?php
+    }
+
+    /**
+     * Smart XML-RPC Filter: Allow Jetpack/Automattic sync probes while blocking untrusted brute force.
+     */
+    public function filter_xmlrpc_for_jetpack( $enabled ) {
+        // Always allow if Jetpack is verifying or syncing
+        if ( isset( $_SERVER['HTTP_USER_AGENT'] ) && strpos( $_SERVER['HTTP_USER_AGENT'], 'Jetpack' ) !== false ) {
+            return true;
+        }
+        // Allow if request contains Jetpack signature or token
+        if ( isset( $_GET['jetpack'] ) || isset( $_SERVER['HTTP_X_JETPACK_SIGNATURE'] ) ) {
+            return true;
+        }
+        return false;
+    }
+
+    /**
+     * Disable dangerous XML-RPC pingback DDoS vectors while preserving standard API functions.
+     */
+    public function disable_xmlrpc_pingback( $methods ) {
+        unset( $methods['pingback.ping'] );
+        unset( $methods['pingback.extensions.getPingbacks'] );
+        return $methods;
     }
 }
 
