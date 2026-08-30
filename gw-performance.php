@@ -162,6 +162,9 @@ class GW_Performance_Engine {
      * SEO Engine: Meta Injection
      */
     public function inject_seo_meta() {
+        // Prevent duplicate meta description if Jetpack SEO is active
+        $has_jetpack_seo = class_exists( 'Jetpack' ) && Jetpack::is_module_active( 'seo-tools' );
+        
         if ( is_front_page() || is_home() ) {
             $desc = get_bloginfo( 'description' );
         } elseif ( is_singular() ) {
@@ -171,7 +174,9 @@ class GW_Performance_Engine {
         }
 
         $desc = wp_strip_all_tags( $desc );
-        echo '<meta name="description" content="' . esc_attr( $desc ) . '">' . "\n";
+        if ( ! $has_jetpack_seo && $desc ) {
+            echo '<meta name="description" content="' . esc_attr( $desc ) . '">' . "\n";
+        }
         echo '<meta property="og:title" content="' . esc_attr( wp_get_document_title() ) . '">' . "\n";
         echo '<meta property="og:description" content="' . esc_attr( $desc ) . '">' . "\n";
         echo '<meta property="og:type" content="' . (is_singular() ? 'article' : 'website') . '">' . "\n";
