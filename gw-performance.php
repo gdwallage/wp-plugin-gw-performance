@@ -1,8 +1,8 @@
 <?php
 /*
 Plugin Name: Gary Wallage Industrial Performance
-Description: The high-performance engine for the Gary Wallage Wedding ecosystem. Consolidates bloat removal, LCP protection, and asset optimization into a single, zero-overhead plugin.
-Version: 1.1.0
+Description: The high-performance engine for the Gary Wallage Photography ecosystem. Consolidates bloat removal, LCP protection, bfcache optimization, and asset hardening into a single zero-overhead plugin.
+Version: 1.2.0
 Author: Gary David Wallage
 */
 
@@ -15,8 +15,10 @@ class GW_Performance_Engine {
         add_action( 'init', array( $this, 'nuke_wp_bloat' ) );
         
         // 2. LCP & Image Optimization
+        add_action( 'wp_head', array( $this, 'preload_lcp_image' ), 1 );
         add_filter( 'wp_lazy_loading_enabled', array( $this, 'protect_lcp_images' ), 10, 3 );
         add_filter( 'wp_get_attachment_image_attributes', array( $this, 'add_lcp_priority' ), 10, 2 );
+        add_filter( 'wp_get_attachment_image_attributes', array( $this, 'add_native_auto_sizes' ), 10, 2 );
         
         // 3. Script & Style Optimization
         add_filter( 'script_loader_tag', array( $this, 'defer_scripts' ), 10, 2 );
@@ -36,22 +38,28 @@ class GW_Performance_Engine {
         // 7. Modern Image Swapper (PNG/JPG -> WebP)
         add_filter( 'wp_get_attachment_image_src', array( $this, 'swap_with_webp' ), 10, 4 );
 
-        // 8. Industrial HTML Cleaner (Ghost Link Eraser)
+        // 8. Industrial HTML Cleaner & Facade Optimizer
         add_action( 'template_redirect', array( $this, 'start_cleaner_buffer' ), 1 );
+        add_filter( 'the_content', array( $this, 'optimize_embed_facades' ), 20 );
 
-        // 9. Unload Sync Bloat (Lightroom, etc.)
+        // 9. Unload Sync Bloat
         add_action( 'wp_enqueue_scripts', array( $this, 'unload_sync_bloat' ), 99 );
 
-        // 10. Industrial Settings
+        // 10. Attachment Page Nullifier & bfcache Optimizer
+        add_action( 'template_redirect', array( $this, 'redirect_attachment_pages' ), 1 );
+        add_action( 'send_headers', array( $this, 'optimize_bfcache_headers' ) );
+
+        // 11. Industrial Settings
         add_action( 'admin_menu', array( $this, 'add_settings_menu' ) );
         add_action( 'admin_init', array( $this, 'register_settings' ) );
 
-        // 11. SEO & Navigation (Migrated from Theme)
+        // 12. SEO & Navigation (Migrated from Theme)
         add_action( 'wp_head', array( $this, 'inject_seo_meta' ), 5 );
         add_action( 'wp_head', array( $this, 'inject_seo_schema' ), 20 );
 
-        // 12. "Borrowed" Pro Features: Speculation Rules & Hardening
+        // 13. Speculation Rules, Copyright Shield & Hardening
         add_action( 'wp_head', array( $this, 'inject_speculation_rules' ), 2 );
+        add_action( 'wp_footer', array( $this, 'inject_copyright_shield' ), 99 );
         add_action( 'init', array( $this, 'harden_security' ) );
         add_filter( 'xmlrpc_enabled', array( $this, 'filter_xmlrpc_for_jetpack' ) );
         add_filter( 'xmlrpc_methods', array( $this, 'disable_xmlrpc_pingback' ) );
@@ -92,37 +100,44 @@ class GW_Performance_Engine {
     }
 
     /**
-     * Speculation Rules API: Instant navigation via pre-fetching.
+     * Enhancement 7: Speculation Rules API - Predictive Prefetch & Moderate Prerender
      */
     public function inject_speculation_rules() {
         if ( is_admin() ) return;
+        
+        $urls = array();
+        $locations = get_nav_menu_locations();
+        $menu = isset($locations['primary']) ? wp_get_nav_menu_object($locations['primary']) : null;
+        if ($menu) {
+            $items = wp_get_nav_menu_items($menu->term_id);
+            if ($items) {
+                foreach (array_slice($items, 0, 6) as $item) {
+                    $urls[] = '"' . esc_url($item->url) . '"';
+                }
+            }
+        }
         ?>
         <script type="speculationrules">
         {
           "prefetch": [
             {
               "source": "list",
-              "urls": [<?php 
-                // Pre-fetch top 5 menu items for instant feel
-                $locations = get_nav_menu_locations();
-                $menu = isset($locations['primary']) ? wp_get_nav_menu_object($locations['primary']) : null;
-                if ($menu) {
-                    $items = wp_get_nav_menu_items($menu->term_id);
-                    if ($items) {
-                        $urls = array();
-                        foreach (array_slice($items, 0, 5) as $item) {
-                            $urls[] = '"' . $item->url . '"';
-                        }
-                        echo implode(',', $urls);
-                    }
-                }
-              ?>]
+              "urls": [<?php echo implode(',', $urls); ?>]
             }
           ],
           "prerender": [
             {
-              "source": "list",
-              "urls": []
+              "source": "document",
+              "where": {
+                "and": [
+                  { "href_matches": "/*" },
+                  { "not": { "href_matches": "/wp-admin/*" } },
+                  { "not": { "href_matches": "/wp-login.php*" } },
+                  { "not": { "href_matches": "/cart/*" } },
+                  { "not": { "href_matches": "/checkout/*" } }
+                ]
+              },
+              "eagerness": "moderate"
             }
           ]
         }
@@ -134,7 +149,9 @@ class GW_Performance_Engine {
      * Security Hardening: Strips legacy headers and disables XML-RPC.
      */
     public function harden_security() {
-        header_remove( 'X-Pingback' );
+        if ( ! headers_sent() ) {
+            header_remove( 'X-Pingback' );
+        }
         add_filter( 'wp_headers', function( $headers ) {
             unset( $headers['X-Pingback'] );
             return $headers;
@@ -511,6 +528,112 @@ class GW_Performance_Engine {
         unset( $methods['pingback.ping'] );
         unset( $methods['pingback.extensions.getPingbacks'] );
         return $methods;
+    }
+
+    /**
+     * Enhancement 1: Dynamic <head> LCP Image Preloader
+     */
+    public function preload_lcp_image() {
+        if ( is_admin() ) return;
+
+        $preload_url = '';
+
+        if ( is_singular() && has_post_thumbnail() ) {
+            $thumb_id = get_post_thumbnail_id();
+            $src = wp_get_attachment_image_src( $thumb_id, 'large' );
+            if ( $src && ! empty( $src[0] ) ) {
+                $preload_url = $src[0];
+            }
+        } elseif ( is_front_page() ) {
+            $locations = get_nav_menu_locations();
+            $menu = isset($locations['primary']) ? wp_get_nav_menu_object($locations['primary']) : null;
+            if ( $menu ) {
+                $items = wp_get_nav_menu_items( $menu->term_id );
+                if ( $items && ! empty( $items[0]->object_id ) ) {
+                    $hero_thumb_id = get_post_thumbnail_id( $items[0]->object_id );
+                    if ( $hero_thumb_id ) {
+                        $src = wp_get_attachment_image_src( $hero_thumb_id, 'large' );
+                        if ( $src && ! empty( $src[0] ) ) {
+                            $preload_url = $src[0];
+                        }
+                    }
+                }
+            }
+        }
+
+        if ( $preload_url ) {
+            $is_webp = (bool) preg_match( '/\.webp$/i', $preload_url );
+            $type_attr = $is_webp ? ' type="image/webp"' : '';
+            echo '<link rel="preload" as="image" href="' . esc_url( $preload_url ) . '"' . $type_attr . ' fetchpriority="high" />' . "\n";
+        }
+    }
+
+    /**
+     * Enhancement 2: Native HTML5 sizes="auto" attribute for responsive lazy images
+     */
+    public function add_native_auto_sizes( $attr, $attachment ) {
+        if ( is_admin() ) return $attr;
+        
+        if ( isset( $attr['loading'] ) && 'lazy' === $attr['loading'] ) {
+            if ( ! empty( $attr['sizes'] ) && strpos( $attr['sizes'], 'auto' ) === false ) {
+                $attr['sizes'] = 'auto, ' . $attr['sizes'];
+            }
+        }
+        return $attr;
+    }
+
+    /**
+     * Enhancement 4: Lazy Embed Facades for YouTube/Vimeo/Google Maps
+     */
+    public function optimize_embed_facades( $content ) {
+        if ( ! $content || is_admin() ) return $content;
+        $content = preg_replace( '/<iframe(?![^>]*\bloading=)([^>]*)>/i', '<iframe loading="lazy" fetchpriority="low"$1>', $content );
+        return $content;
+    }
+
+    /**
+     * Enhancement 5: Attachment Page Nullifier (Prevents empty attachment page indexing)
+     */
+    public function redirect_attachment_pages() {
+        if ( is_attachment() ) {
+            global $post;
+            if ( ! empty( $post->post_parent ) ) {
+                wp_safe_redirect( get_permalink( $post->post_parent ), 301 );
+            } else {
+                wp_safe_redirect( home_url( '/' ), 301 );
+            }
+            exit;
+        }
+    }
+
+    /**
+     * Enhancement 3: Back/Forward Cache (bfcache) Header Optimization
+     */
+    public function optimize_bfcache_headers() {
+        if ( ! is_user_logged_in() && ! is_admin() ) {
+            header_remove( 'Pragma' );
+        }
+    }
+
+    /**
+     * Enhancement 6: Zero-Overhead Lightweight Copyright Shield for Photography
+     */
+    public function inject_copyright_shield() {
+        if ( is_admin() || is_user_logged_in() ) return;
+        ?>
+        <script id="gw-copyright-shield">
+        document.addEventListener('contextmenu', function(e) {
+            if (e.target.closest('.wp-block-image, .portfolio-gallery, .hero-carousel, .gw-gallery-grid, .custom-logo, .image-frame')) {
+                e.preventDefault();
+            }
+        }, { passive: false });
+        document.addEventListener('dragstart', function(e) {
+            if (e.target.closest('.wp-block-image img, .portfolio-gallery img, .hero-carousel img, .gw-gallery-grid img, .image-frame img')) {
+                e.preventDefault();
+            }
+        }, { passive: false });
+        </script>
+        <?php
     }
 }
 
