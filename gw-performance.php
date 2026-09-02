@@ -63,6 +63,11 @@ class GW_Performance_Engine {
         add_action( 'init', array( $this, 'harden_security' ) );
         add_filter( 'xmlrpc_enabled', array( $this, 'filter_xmlrpc_for_jetpack' ) );
         add_filter( 'xmlrpc_methods', array( $this, 'disable_xmlrpc_pingback' ) );
+
+        // 14. Dominant Color Image Placeholders (replaces dominant-color-images plugin)
+        add_filter( 'wp_generate_attachment_metadata', array( $this, 'compute_dominant_color_metadata' ), 10, 2 );
+        add_filter( 'wp_get_attachment_image_attributes', array( $this, 'apply_dominant_color_attributes' ), 10, 2 );
+        add_action( 'wp_enqueue_scripts', array( $this, 'inject_dominant_color_style' ) );
     }
 
     /**
@@ -639,6 +644,112 @@ class GW_Performance_Engine {
         }, { passive: false });
         </script>
         <?php
+    }
+
+    /**
+     * Enhancement 14a: Computes the dominant color of the full-size image and
+     * whether it has transparency, storing both on the attachment metadata.
+     * Replaces the dominant-color-images plugin: same 1x1-downscale trick
+     * (GD's resampling averages every pixel into one), same metadata keys
+     * ('dominant_color', 'has_transparency') so any existing front-end code
+     * keyed on those keeps working unchanged.
+     */
+    public function compute_dominant_color_metadata( $metadata, $attachment_id ) {
+        if ( ! is_array( $metadata ) ) $metadata = array();
+
+        $file = get_attached_file( $attachment_id );
+        if ( ! $file || ! file_exists( $file ) ) return $metadata;
+
+        $color_data = $this->extract_dominant_color( $file, get_post_mime_type( $attachment_id ) );
+        if ( $color_data ) {
+            $metadata['dominant_color']   = $color_data['color'];
+            $metadata['has_transparency'] = $color_data['has_transparency'];
+        }
+
+        return $metadata;
+    }
+
+    /**
+     * Loads the image with GD, downsamples it to 1x1px to get the average
+     * (dominant) color, and grid-samples for transparency instead of scanning
+     * every pixel (real photography never has alpha, so this stays cheap for
+     * the common case while still catching transparent PNG/WebP/AVIF assets).
+     */
+    private function extract_dominant_color( $file, $mime ) {
+        switch ( $mime ) {
+            case 'image/jpeg': $src = @imagecreatefromjpeg( $file ); break;
+            case 'image/png':  $src = @imagecreatefrompng( $file ); break;
+            case 'image/gif':  $src = @imagecreatefromgif( $file ); break;
+            case 'image/webp': $src = function_exists( 'imagecreatefromwebp' ) ? @imagecreatefromwebp( $file ) : false; break;
+            case 'image/avif': $src = function_exists( 'imagecreatefromavif' ) ? @imagecreatefromavif( $file ) : false; break;
+            default: return null;
+        }
+        if ( ! $src ) return null;
+
+        imagepalettetotruecolor( $src );
+
+        $w = imagesx( $src );
+        $h = imagesy( $src );
+        if ( $w < 1 || $h < 1 ) { imagedestroy( $src ); return null; }
+
+        $tiny = imagecreatetruecolor( 1, 1 );
+        imagecopyresampled( $tiny, $src, 0, 0, 0, 0, 1, 1, $w, $h );
+        $rgb = imagecolorat( $tiny, 0, 0 );
+        imagedestroy( $tiny );
+
+        $r = ( $rgb >> 16 ) & 0xFF;
+        $g = ( $rgb >> 8 ) & 0xFF;
+        $b = $rgb & 0xFF;
+
+        $has_transparency = false;
+        if ( in_array( $mime, array( 'image/png', 'image/gif', 'image/webp', 'image/avif' ), true ) ) {
+            $step_x = max( 1, (int) floor( $w / 50 ) );
+            $step_y = max( 1, (int) floor( $h / 50 ) );
+            for ( $x = 0; $x < $w && ! $has_transparency; $x += $step_x ) {
+                for ( $y = 0; $y < $h; $y += $step_y ) {
+                    $px = imagecolorat( $src, $x, $y );
+                    if ( ( ( $px >> 24 ) & 0x7F ) > 0 ) { $has_transparency = true; break; }
+                }
+            }
+        }
+
+        imagedestroy( $src );
+
+        return array(
+            'color'            => sprintf( '%02x%02x%02x', $r, $g, $b ),
+            'has_transparency' => $has_transparency,
+        );
+    }
+
+    /**
+     * Enhancement 14b: Applies the stored dominant color as a CSS custom
+     * property + data attribute. Same markup contract as the
+     * dominant-color-images plugin ([data-dominant-color], --dominant-color)
+     * so it's a drop-in replacement for any CSS already keyed on it.
+     */
+    public function apply_dominant_color_attributes( $attr, $attachment ) {
+        $meta = wp_get_attachment_metadata( $attachment->ID );
+        if ( ! is_array( $meta ) || empty( $meta['dominant_color'] ) ) return $attr;
+
+        $attr['data-dominant-color'] = esc_attr( $meta['dominant_color'] );
+        $style          = isset( $attr['style'] ) ? $attr['style'] : '';
+        $attr['style']  = '--dominant-color: #' . esc_attr( $meta['dominant_color'] ) . ';' . $style;
+
+        if ( ! empty( $meta['has_transparency'] ) ) {
+            $attr['data-has-transparency'] = 'true';
+        }
+
+        return $attr;
+    }
+
+    /**
+     * Enhancement 14c: Background-color CSS driven by the --dominant-color
+     * custom property, applied only to non-transparent images.
+     */
+    public function inject_dominant_color_style() {
+        wp_register_style( 'gw-dominant-color', false );
+        wp_enqueue_style( 'gw-dominant-color' );
+        wp_add_inline_style( 'gw-dominant-color', 'img[data-dominant-color]:not([data-has-transparency="true"]) { background-color: var(--dominant-color); }' );
     }
 }
 
