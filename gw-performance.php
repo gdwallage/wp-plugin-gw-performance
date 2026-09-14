@@ -330,7 +330,12 @@ class GW_Performance_Engine {
         static $high_priority_set = false;
         if ( ! is_admin() && ! $high_priority_set ) {
             $attrs['fetchpriority'] = 'high';
+            $attrs['loading'] = 'eager';
             $high_priority_set = true;
+        }
+        // Mobile-responsive logo sizing (ensures 70px mobile display gets matched thumbnail)
+        if ( isset( $attrs['class'] ) && strpos( $attrs['class'], 'custom-logo' ) !== false ) {
+            $attrs['sizes'] = '(max-width: 768px) 70px, 250px';
         }
         return $attrs;
     }
@@ -494,7 +499,7 @@ class GW_Performance_Engine {
 
         // Dequeue unused Bookly assets on homepage (eliminates ~194 KiB JS and ~102 KiB CSS)
         if ( is_front_page() ) {
-            $bookly_styles = array(
+            $unused_frontpage_styles = array(
                 'bookly-backend-globals',
                 'bookly-frontend-globals',
                 'bookly-tailwind.css',
@@ -506,8 +511,9 @@ class GW_Performance_Engine {
                 'bookly-bookly-main.css',
                 'bookly-bootstrap.min.css',
                 'bookly-customer-profile.css',
+                'wc-blocks-style',
             );
-            foreach ( $bookly_styles as $handle ) {
+            foreach ( $unused_frontpage_styles as $handle ) {
                 wp_dequeue_style( $handle );
                 wp_deregister_style( $handle );
             }
