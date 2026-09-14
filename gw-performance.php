@@ -42,8 +42,8 @@ class GW_Performance_Engine {
         add_action( 'template_redirect', array( $this, 'start_cleaner_buffer' ), 1 );
         add_filter( 'the_content', array( $this, 'optimize_embed_facades' ), 20 );
 
-        // 9. Unload Sync Bloat
-        add_action( 'wp_enqueue_scripts', array( $this, 'unload_sync_bloat' ), 99 );
+        // 9. Unload Sync Bloat & Homepage Unused Assets
+        add_action( 'wp_enqueue_scripts', array( $this, 'unload_sync_bloat' ), 999 );
 
         // 10. Attachment Page Nullifier & bfcache Optimizer
         add_action( 'template_redirect', array( $this, 'redirect_attachment_pages' ), 1 );
@@ -367,28 +367,46 @@ class GW_Performance_Engine {
     public function anchor_image_dimensions( $content ) {
         if ( ! $content ) return $content;
 
-        // Regex to find images and check for width/height
+        // Regex to find images and check for width/height/alt
         $content = preg_replace_callback( '/<img[^>]+>/i', function( $match ) {
             $img = $match[0];
             
-            // If already has both, leave it
-            if ( strpos( $img, 'width=' ) !== false && strpos( $img, 'height=' ) !== false ) {
-                return $img;
-            }
-
-            // Try to extract ID from class or src
-            if ( preg_match( '/wp-image-([0-9]+)/i', $img, $id_match ) ) {
-                $id = $id_match[1];
-                $meta = wp_get_attachment_metadata( $id );
-                if ( $meta && isset( $meta['width'], $meta['height'] ) ) {
-                    if ( strpos( $img, 'width=' ) === false ) {
-                        $img = str_replace( '<img', '<img width="' . $meta['width'] . '"', $img );
-                    }
-                    if ( strpos( $img, 'height=' ) === false ) {
-                        $img = str_replace( '<img', '<img height="' . $meta['height'] . '"', $img );
+            // If missing width or height, attempt recovery
+            if ( strpos( $img, 'width=' ) === false || strpos( $img, 'height=' ) === false ) {
+                $w = null;
+                $h = null;
+                // Try to extract ID from class or src
+                if ( preg_match( '/wp-image-([0-9]+)/i', $img, $id_match ) ) {
+                    $id = $id_match[1];
+                    $meta = wp_get_attachment_metadata( $id );
+                    if ( $meta && isset( $meta['width'], $meta['height'] ) ) {
+                        $w = $meta['width'];
+                        $h = $meta['height'];
                     }
                 }
+                // Try from dimension pattern in file name (e.g. -600x428.webp)
+                if ( ( ! $w || ! $h ) && preg_match( '/-([0-9]{2,4})x([0-9]{2,4})\.(?:webp|jpg|jpeg|png|avif)/i', $img, $dim_match ) ) {
+                    $w = $dim_match[1];
+                    $h = $dim_match[2];
+                }
+
+                if ( $w && strpos( $img, 'width=' ) === false ) {
+                    $img = str_replace( '<img', '<img width="' . (int)$w . '"', $img );
+                }
+                if ( $h && strpos( $img, 'height=' ) === false ) {
+                    $img = str_replace( '<img', '<img height="' . (int)$h . '"', $img );
+                }
             }
+
+            // Ensure alt attribute is present and non-empty
+            if ( ! preg_match( '/alt=["\']([^"\']+)["\']/i', $img ) ) {
+                if ( preg_match( '/alt=["\']\s*["\']/i', $img ) ) {
+                    $img = preg_replace( '/alt=["\']\s*["\']/i', 'alt="Gary Wallage Photography"', $img );
+                } else {
+                    $img = str_replace( '<img', '<img alt="Gary Wallage Photography"', $img );
+                }
+            }
+
             return $img;
         }, $content );
 
@@ -397,15 +415,22 @@ class GW_Performance_Engine {
 
     /**
      * Ensures all images have Alt tags for SEO and Accessibility.
-     * Uses the attachment title or page title as a fallback.
+     * Uses the attachment title, parent post title, or page title as a fallback.
      */
     public function ensure_image_alt_tags( $attr, $attachment ) {
-        if ( empty( $attr['alt'] ) ) {
-            $title = get_the_title( $attachment->ID );
-            if ( ! $title ) {
-                $title = get_the_title(); // Fallback to Page Title
+        $alt = isset( $attr['alt'] ) ? trim( (string) $attr['alt'] ) : '';
+        if ( empty( $alt ) ) {
+            $alt = get_post_meta( $attachment->ID, '_wp_attachment_image_alt', true );
+            if ( empty( $alt ) ) {
+                $alt = get_the_title( $attachment->ID );
             }
-            $attr['alt'] = esc_attr( $title );
+            if ( empty( $alt ) ) {
+                $alt = get_the_title();
+            }
+            if ( empty( $alt ) ) {
+                $alt = 'Gary Wallage Photography';
+            }
+            $attr['alt'] = esc_attr( $alt );
         }
         return $attr;
     }
@@ -459,13 +484,52 @@ class GW_Performance_Engine {
     }
 
     /**
-     * Unloads scripts from sync plugins that are not needed by frontend visitors.
+     * Unloads scripts and styles from sync plugins and unused features on the front page.
      */
     public function unload_sync_bloat() {
         if ( is_admin() ) return;
         
         wp_dequeue_script( 'lr-wp-bridge-js' );
         wp_dequeue_style( 'lr-wp-bridge-css' );
+
+        // Dequeue unused Bookly assets on homepage (eliminates ~194 KiB JS and ~102 KiB CSS)
+        if ( is_front_page() ) {
+            $bookly_styles = array(
+                'bookly-backend-globals',
+                'bookly-frontend-globals',
+                'bookly-tailwind.css',
+                'bookly-ladda.min.css',
+                'bookly-frontend-reset.css',
+                'bookly-modern-booking-form-calendar.css',
+                'bookly-bootstrap-icons.min.css',
+                'bookly-intlTelInput.css',
+                'bookly-bookly-main.css',
+                'bookly-bootstrap.min.css',
+                'bookly-customer-profile.css',
+            );
+            foreach ( $bookly_styles as $handle ) {
+                wp_dequeue_style( $handle );
+                wp_deregister_style( $handle );
+            }
+
+            $bookly_scripts = array(
+                'bookly-spin.min.js',
+                'bookly-globals',
+                'bookly-ladda.min.js',
+                'bookly-moment.min.js',
+                'bookly-hammer.min.js',
+                'bookly-jquery.hammer.min.js',
+                'bookly-qrcode.js',
+                'bookly-bookly.min.js',
+                'bookly-intlTelInput.min.js',
+                'bookly-bookly-core.js',
+                'bookly-ai-assistant.js',
+                'bookly-customer-profile.js',
+            );
+            foreach ( $bookly_scripts as $handle ) {
+                wp_dequeue_script( $handle );
+            }
+        }
     }
 
     /**
