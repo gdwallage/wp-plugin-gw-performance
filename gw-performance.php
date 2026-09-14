@@ -518,7 +518,7 @@ class GW_Performance_Engine {
                 wp_deregister_style( $handle );
             }
 
-            $bookly_scripts = array(
+            $unused_frontpage_scripts = array(
                 'bookly-spin.min.js',
                 'bookly-globals',
                 'bookly-ladda.min.js',
@@ -531,9 +531,21 @@ class GW_Performance_Engine {
                 'bookly-bookly-core.js',
                 'bookly-ai-assistant.js',
                 'bookly-customer-profile.js',
+                'wc-cart-fragments',
+                'woocommerce',
+                'jquery-blockui',
+                'wc-jquery-blockui',
+                'wc-add-to-cart',
+                'sourcebuster-js',
+                'wc-order-attribution',
+                'woocommerce-analytics-client',
+                'jquery',
+                'jquery-core',
+                'jquery-migrate',
             );
-            foreach ( $bookly_scripts as $handle ) {
+            foreach ( $unused_frontpage_scripts as $handle ) {
                 wp_dequeue_script( $handle );
+                wp_deregister_script( $handle );
             }
         }
     }
