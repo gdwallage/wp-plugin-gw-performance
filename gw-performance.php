@@ -2,7 +2,7 @@
 /*
 Plugin Name: Gary Wallage Industrial Performance
 Description: The high-performance engine for the Gary Wallage Photography ecosystem. Consolidates bloat removal, LCP protection, bfcache optimization, and asset hardening into a single zero-overhead plugin.
-Version: 1.2.0
+Version: 1.4.0
 Author: Gary David Wallage
 */
 
@@ -67,6 +67,10 @@ class GW_Performance_Engine {
         add_action( 'init', array( $this, 'harden_security' ) );
         add_filter( 'xmlrpc_enabled', array( $this, 'filter_xmlrpc_for_jetpack' ) );
         add_filter( 'xmlrpc_methods', array( $this, 'disable_xmlrpc_pingback' ) );
+
+        // 14. Font Performance (display=swap & preconnect)
+        add_filter( 'style_loader_src', array( $this, 'add_font_display_swap' ), 10, 2 );
+        add_filter( 'wp_resource_hints', array( $this, 'add_font_resource_hints' ), 10, 2 );
 
         // 14. Dominant Color Image Placeholders (replaces dominant-color-images plugin)
         add_filter( 'wp_generate_attachment_metadata', array( $this, 'compute_dominant_color_metadata' ), 10, 2 );
@@ -690,18 +694,140 @@ class GW_Performance_Engine {
 
     /**
      * Surgically removes broken legacy links and ghost plugin references 
-     * from the final HTML output before it reaches the browser.
+     * from the final HTML output, swaps images for WebP siblings, and anchors dimensions.
      */
     public function industrial_html_cleaner( $html ) {
-        if ( ! $html ) return $html;
+        if ( ! $html || is_admin() ) return $html;
 
-        // Remove <link> tags containing broken paths (removed stale your-theme check)
+        // 1. Remove <link> and <script> tags containing broken legacy paths
         $html = preg_replace( '/<link[^>]+(?:_jb_static|image-prioritizer)[^>]*>/i', '<!-- Removed Ghost Link -->', $html );
-
-        // Remove <script> tags containing broken paths (removed stale your-theme check)
         $html = preg_replace( '/<script[^>]+(?:_jb_static|image-prioritizer)[^>]*>.*?<\/script>/i', '<!-- Removed Ghost Script -->', $html );
 
+        // 2. Automated WebP Replacement across output buffer (src, srcset, data-image, etc.)
+        $html = $this->rewrite_html_images_to_webp( $html );
+
+        // 3. Anchor image dimensions and alt attributes across all <img> tags (fixing CLS & accessibility)
+        $html = $this->enforce_html_image_attributes( $html );
+
         return $html;
+    }
+
+    /**
+     * Intercepts upload image URLs across the entire HTML output buffer and swaps them for WebP
+     * siblings when present on disk.
+     */
+    public function rewrite_html_images_to_webp( $html ) {
+        static $checked_urls = array();
+
+        $uploads = wp_upload_dir();
+        $base_url = $uploads['baseurl'];
+        $base_dir = $uploads['basedir'];
+        $regex_base = preg_quote( $base_url, '/' );
+
+        return preg_replace_callback( '/' . $regex_base . '\/([^\s"\'<>]+\.(?:png|jpe?g))/i', function( $m ) use ( &$checked_urls, $base_url, $base_dir ) {
+            $full_url = $m[0];
+            $rel_path = $m[1];
+
+            if ( isset( $checked_urls[ $full_url ] ) ) {
+                return $checked_urls[ $full_url ];
+            }
+
+            $base_rel = preg_replace( '/\.(?:png|jpe?g)$/i', '', $rel_path );
+            $webp_rel1 = $base_rel . '.webp';
+            $webp_rel2 = $rel_path . '.webp';
+
+            if ( file_exists( $base_dir . '/' . $webp_rel1 ) ) {
+                $checked_urls[ $full_url ] = $base_url . '/' . $webp_rel1;
+            } elseif ( file_exists( $base_dir . '/' . $webp_rel2 ) ) {
+                $checked_urls[ $full_url ] = $base_url . '/' . $webp_rel2;
+            } else {
+                $checked_urls[ $full_url ] = $full_url;
+            }
+
+            return $checked_urls[ $full_url ];
+        }, $html );
+    }
+
+    /**
+     * Enforces explicit width, height, and fallback alt attributes on all <img> tags in the HTML buffer.
+     */
+    public function enforce_html_image_attributes( $html ) {
+        static $dim_cache = array();
+        $uploads = wp_upload_dir();
+        $base_url = $uploads['baseurl'];
+        $base_dir = $uploads['basedir'];
+
+        return preg_replace_callback( '/<img\b([^>]*)>/i', function( $m ) use ( &$dim_cache, $base_url, $base_dir ) {
+            $tag = $m[0];
+
+            $has_w = (bool) preg_match( '/\bwidth=["\']?[0-9]+/i', $tag );
+            $has_h = (bool) preg_match( '/\bheight=["\']?[0-9]+/i', $tag );
+
+            if ( ! $has_w || ! $has_h ) {
+                $w = null;
+                $h = null;
+
+                // Dimension from filename pattern: e.g. -300x176.webp or -500x380.jpeg
+                if ( preg_match( '/-([0-9]{2,4})x([0-9]{2,4})\.(?:webp|png|jpe?g|avif)/i', $tag, $dm ) ) {
+                    $w = (int) $dm[1];
+                    $h = (int) $dm[2];
+                } elseif ( preg_match( '/\bsrc=["\']([^"\']+)["\']/i', $tag, $sm ) ) {
+                    $src = $sm[1];
+                    if ( isset( $dim_cache[ $src ] ) ) {
+                        $w = $dim_cache[ $src ]['w'];
+                        $h = $dim_cache[ $src ]['h'];
+                    } elseif ( strpos( $src, $base_url ) === 0 ) {
+                        $rel = substr( $src, strlen( $base_url ) );
+                        $local = $base_dir . $rel;
+                        if ( ! file_exists( $local ) && preg_match( '/\.webp$/i', $local ) ) {
+                            $orig = preg_replace( '/\.webp$/i', '', $local );
+                            if ( file_exists( $orig ) ) {
+                                $local = $orig;
+                            }
+                        }
+                        if ( file_exists( $local ) ) {
+                            $sz = @getimagesize( $local );
+                            if ( $sz && ! empty( $sz[0] ) && ! empty( $sz[1] ) ) {
+                                $w = (int) $sz[0];
+                                $h = (int) $sz[1];
+                                $dim_cache[ $src ] = array( 'w' => $w, 'h' => $h );
+                            }
+                        }
+                    }
+                }
+
+                if ( $w && ! $has_w ) {
+                    $tag = preg_replace( '/<img\b/i', '<img width="' . $w . '"', $tag );
+                }
+                if ( $h && ! $has_h ) {
+                    $tag = preg_replace( '/<img\b/i', '<img height="' . $h . '"', $tag );
+                }
+            }
+
+            // Alt attribute fallback
+            if ( ! preg_match( '/\balt=["\'][^"\']+["\']/i', $tag ) ) {
+                $alt = esc_attr( get_bloginfo( 'name' ) );
+                if ( preg_match( '/BACP/i', $tag ) ) {
+                    $alt = 'BACP Registered & Accredited Counsellor';
+                } elseif ( preg_match( '/Attachment-Badge/i', $tag ) ) {
+                    $alt = 'Attachment-Based Therapy Certified';
+                } elseif ( preg_match( '/online-and-tel/i', $tag ) ) {
+                    $alt = 'Online and Telephone Counselling UK';
+                } elseif ( preg_match( '/Catherine-W/i', $tag ) ) {
+                    $alt = 'Catherine Wallage - Trauma & Attachment Therapist';
+                } elseif ( preg_match( '/Trauma/i', $tag ) ) {
+                    $alt = 'Trauma Informed Therapy & Recovery';
+                }
+
+                if ( preg_match( '/\balt=["\']\s*["\']/i', $tag ) ) {
+                    $tag = preg_replace( '/\balt=["\']\s*["\']/i', 'alt="' . $alt . '"', $tag );
+                } else {
+                    $tag = preg_replace( '/<img\b/i', '<img alt="' . $alt . '"', $tag );
+                }
+            }
+
+            return $tag;
+        }, $html );
     }
 
     /**
@@ -712,6 +838,39 @@ class GW_Performance_Engine {
         
         wp_dequeue_script( 'lr-wp-bridge-js' );
         wp_dequeue_style( 'lr-wp-bridge-css' );
+
+        // Dequeue dashicons and editor styles for non-logged-in frontend users
+        if ( ! is_user_logged_in() ) {
+            wp_dequeue_style( 'dashicons' );
+            wp_deregister_style( 'dashicons' );
+
+            $editor_styles = array(
+                'wp-block-editor',
+                'wp-editor',
+                'wp-components',
+                'wp-preferences',
+                'wp-reusable-blocks',
+                'wp-patterns',
+                'wp-media-utils',
+            );
+            foreach ( $editor_styles as $handle ) {
+                wp_dequeue_style( $handle );
+                wp_deregister_style( $handle );
+            }
+        }
+
+        // Dequeue WooCommerce styles if WooCommerce is inactive
+        if ( ! class_exists( 'WooCommerce' ) ) {
+            wp_dequeue_style( 'bard-woocommerce' );
+            wp_deregister_style( 'bard-woocommerce' );
+            wp_dequeue_style( 'woocommerce-general' );
+            wp_dequeue_style( 'woocommerce-layout' );
+            wp_dequeue_style( 'woocommerce-smallscreen' );
+        }
+
+        // Dequeue unused frontend TaxoPress styling
+        wp_dequeue_style( 'taxopress-frontend-css' );
+        wp_deregister_style( 'taxopress-frontend-css' );
 
         // Dequeue unused Bookly / WooCommerce assets on homepage if present
         if ( is_front_page() ) {
@@ -768,6 +927,33 @@ class GW_Performance_Engine {
                 wp_deregister_script( $handle );
             }
         }
+    }
+
+    /**
+     * Enforces font-display: swap on Google Fonts stylesheets.
+     */
+    public function add_font_display_swap( $src, $handle ) {
+        if ( strpos( $src, 'fonts.googleapis.com/css' ) !== false && strpos( $src, 'display=' ) === false ) {
+            $src = add_query_arg( 'display', 'swap', $src );
+        }
+        return $src;
+    }
+
+    /**
+     * Injects preconnect hints for Google Fonts origins.
+     */
+    public function add_font_resource_hints( $urls, $relation_type ) {
+        if ( 'preconnect' === $relation_type ) {
+            $urls[] = array(
+                'href' => 'https://fonts.googleapis.com',
+                'crossorigin' => 'anonymous',
+            );
+            $urls[] = array(
+                'href' => 'https://fonts.gstatic.com',
+                'crossorigin' => 'anonymous',
+            );
+        }
+        return $urls;
     }
 
     /**
@@ -1074,30 +1260,52 @@ class GW_Performance_Engine {
 
         $preload_url = '';
 
-        if ( is_singular() && has_post_thumbnail() ) {
-            $thumb_id = get_post_thumbnail_id();
-            $src = wp_get_attachment_image_src( $thumb_id, 'large' );
-            if ( $src && ! empty( $src[0] ) ) {
-                $preload_url = $src[0];
-            }
-        } elseif ( is_front_page() ) {
-            $locations = get_nav_menu_locations();
-            $menu = isset($locations['primary']) ? wp_get_nav_menu_object($locations['primary']) : null;
-            if ( $menu ) {
-                $items = wp_get_nav_menu_items( $menu->term_id );
-                if ( $items && ! empty( $items[0]->object_id ) ) {
-                    $hero_thumb_id = get_post_thumbnail_id( $items[0]->object_id );
-                    if ( $hero_thumb_id ) {
-                        $src = wp_get_attachment_image_src( $hero_thumb_id, 'large' );
-                        if ( $src && ! empty( $src[0] ) ) {
-                            $preload_url = $src[0];
+        if ( is_front_page() ) {
+            // Check custom header image first (e.g. Bard, Astra, GeneratePress hero banners)
+            $header_img = get_header_image();
+            if ( $header_img ) {
+                $preload_url = $header_img;
+            } else {
+                $locations = get_nav_menu_locations();
+                $menu = isset($locations['primary']) ? wp_get_nav_menu_object($locations['primary']) : null;
+                if ( $menu ) {
+                    $items = wp_get_nav_menu_items( $menu->term_id );
+                    if ( $items && ! empty( $items[0]->object_id ) ) {
+                        $hero_thumb_id = get_post_thumbnail_id( $items[0]->object_id );
+                        if ( $hero_thumb_id ) {
+                            $src = wp_get_attachment_image_src( $hero_thumb_id, 'large' );
+                            if ( $src && ! empty( $src[0] ) ) {
+                                $preload_url = $src[0];
+                            }
                         }
                     }
                 }
             }
         }
 
+        if ( ! $preload_url && is_singular() && has_post_thumbnail() ) {
+            $thumb_id = get_post_thumbnail_id();
+            $src = wp_get_attachment_image_src( $thumb_id, 'large' );
+            if ( $src && ! empty( $src[0] ) ) {
+                $preload_url = $src[0];
+            }
+        }
+
         if ( $preload_url ) {
+            // Swap to WebP sibling if present on disk
+            $uploads = wp_upload_dir();
+            $base_url = $uploads['baseurl'];
+            $base_dir = $uploads['basedir'];
+            if ( strpos( $preload_url, $base_url ) === 0 ) {
+                $rel = ltrim( substr( $preload_url, strlen( $base_url ) ), '/' );
+                $base_rel = preg_replace( '/\.(?:png|jpe?g)$/i', '', $rel );
+                if ( file_exists( $base_dir . '/' . $base_rel . '.webp' ) ) {
+                    $preload_url = $base_url . '/' . $base_rel . '.webp';
+                } elseif ( file_exists( $base_dir . '/' . $rel . '.webp' ) ) {
+                    $preload_url = $base_url . '/' . $rel . '.webp';
+                }
+            }
+
             $is_webp = (bool) preg_match( '/\.webp$/i', $preload_url );
             $type_attr = $is_webp ? ' type="image/webp"' : '';
             echo '<link rel="preload" as="image" href="' . esc_url( $preload_url ) . '"' . $type_attr . ' fetchpriority="high" />' . "\n";
