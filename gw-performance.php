@@ -42,8 +42,8 @@ class GW_Performance_Engine {
         add_action( 'template_redirect', array( $this, 'start_cleaner_buffer' ), 1 );
         add_filter( 'the_content', array( $this, 'optimize_embed_facades' ), 20 );
 
-        // 9. Unload Sync Bloat & Homepage Unused Assets
-        add_action( 'wp_enqueue_scripts', array( $this, 'unload_sync_bloat' ), 999 );
+        // 9. Unload Sync Bloat
+        add_action( 'wp_enqueue_scripts', array( $this, 'unload_sync_bloat' ), 99 );
 
         // 10. Attachment Page Nullifier & bfcache Optimizer
         add_action( 'template_redirect', array( $this, 'redirect_attachment_pages' ), 1 );
@@ -53,9 +53,13 @@ class GW_Performance_Engine {
         add_action( 'admin_menu', array( $this, 'add_settings_menu' ) );
         add_action( 'admin_init', array( $this, 'register_settings' ) );
 
-        // 12. SEO & Navigation (Migrated from Theme)
+        // 12. SEO & Navigation (Migrated from Theme & Enhanced Bespoke SEO)
         add_action( 'wp_head', array( $this, 'inject_seo_meta' ), 5 );
         add_action( 'wp_head', array( $this, 'inject_seo_schema' ), 20 );
+        add_filter( 'pre_get_document_title', array( $this, 'filter_seo_title' ), 15 );
+        add_action( 'add_meta_boxes', array( $this, 'add_seo_meta_box' ) );
+        add_action( 'save_post', array( $this, 'save_seo_meta_box' ) );
+        add_action( 'admin_post_gw_transfer_aioseo', array( $this, 'handle_transfer_aioseo' ) );
 
         // 13. Speculation Rules, Copyright Shield & Hardening
         add_action( 'wp_head', array( $this, 'inject_speculation_rules' ), 2 );
@@ -164,57 +168,161 @@ class GW_Performance_Engine {
     }
 
     /**
-     * SEO Engine: Meta Injection
+     * Bespoke SEO Engine: Meta & Social Tag Injection
      */
     public function inject_seo_meta() {
-        // Prevent duplicate meta description if Jetpack SEO is active
+        // Prevent duplicate meta description if Jetpack SEO module is active
         $has_jetpack_seo = class_exists( 'Jetpack' ) && Jetpack::is_module_active( 'seo-tools' );
-        
-        if ( is_front_page() || is_home() ) {
-            $desc = get_bloginfo( 'description' );
+        if ( $has_jetpack_seo ) {
+            return;
+        }
+
+        $desc = '';
+        $custom_title = '';
+        $canonical = '';
+        $noindex = false;
+
+        if ( is_front_page() ) {
+            if ( 'page' === get_option( 'show_on_front' ) && ( $front_id = get_option( 'page_on_front' ) ) ) {
+                $desc = get_post_meta( $front_id, '_gw_seo_description', true );
+                $custom_title = get_post_meta( $front_id, '_gw_seo_title', true );
+                $canonical = get_post_meta( $front_id, '_gw_seo_canonical', true );
+                $noindex = (bool) get_post_meta( $front_id, '_gw_seo_noindex', true );
+            }
+            if ( empty( $desc ) ) {
+                $desc = get_bloginfo( 'description' );
+            }
         } elseif ( is_singular() ) {
-            $desc = get_the_excerpt();
+            $post_id = get_the_ID();
+            $desc = get_post_meta( $post_id, '_gw_seo_description', true );
+            if ( empty( $desc ) ) {
+                $desc = get_the_excerpt();
+            }
+            $custom_title = get_post_meta( $post_id, '_gw_seo_title', true );
+            $canonical = get_post_meta( $post_id, '_gw_seo_canonical', true );
+            $noindex = (bool) get_post_meta( $post_id, '_gw_seo_noindex', true );
+        } elseif ( is_home() || is_archive() || is_category() || is_tag() ) {
+            $desc = get_the_archive_description();
+            if ( empty( $desc ) ) {
+                $desc = get_bloginfo( 'description' );
+            }
         } else {
             $desc = get_bloginfo( 'description' );
         }
 
-        $desc = wp_strip_all_tags( $desc );
-        if ( ! $has_jetpack_seo && $desc ) {
+        $desc = wp_strip_all_tags( (string) $desc );
+        if ( $desc ) {
             echo '<meta name="description" content="' . esc_attr( $desc ) . '">' . "\n";
         }
-        echo '<meta property="og:title" content="' . esc_attr( wp_get_document_title() ) . '">' . "\n";
-        echo '<meta property="og:description" content="' . esc_attr( $desc ) . '">' . "\n";
-        echo '<meta property="og:type" content="' . (is_singular() ? 'article' : 'website') . '">' . "\n";
-        echo '<meta property="og:url" content="' . esc_url( get_permalink() ) . '">' . "\n";
-        if ( has_post_thumbnail() ) {
-            echo '<meta property="og:image" content="' . esc_url( get_the_post_thumbnail_url( null, 'large' ) ) . '">' . "\n";
+
+        if ( $noindex ) {
+            echo '<meta name="robots" content="noindex, follow">' . "\n";
         }
+
+        if ( $canonical ) {
+            echo '<link rel="canonical" href="' . esc_url( $canonical ) . '">' . "\n";
+        }
+
+        $og_title = ! empty( $custom_title ) ? $custom_title : wp_get_document_title();
+        echo '<meta property="og:title" content="' . esc_attr( $og_title ) . '">' . "\n";
+        if ( $desc ) {
+            echo '<meta property="og:description" content="' . esc_attr( $desc ) . '">' . "\n";
+        }
+        echo '<meta property="og:type" content="' . ( is_singular() ? 'article' : 'website' ) . '">' . "\n";
+        echo '<meta property="og:url" content="' . esc_url( get_permalink() ) . '">' . "\n";
+        
+        $og_img = '';
+        if ( has_post_thumbnail() ) {
+            $og_img = get_the_post_thumbnail_url( null, 'large' );
+        } else {
+            $options = get_option( 'gw_perf_settings' );
+            if ( ! empty( $options['default_og_image'] ) ) {
+                $og_img = $options['default_og_image'];
+            } elseif ( has_custom_logo() ) {
+                $og_img = wp_get_attachment_image_url( get_theme_mod( 'custom_logo' ), 'full' );
+            }
+        }
+        if ( $og_img ) {
+            echo '<meta property="og:image" content="' . esc_url( $og_img ) . '">' . "\n";
+        }
+
         echo '<meta name="twitter:card" content="summary_large_image">' . "\n";
+        echo '<meta name="twitter:title" content="' . esc_attr( $og_title ) . '">' . "\n";
+        if ( $desc ) {
+            echo '<meta name="twitter:description" content="' . esc_attr( $desc ) . '">' . "\n";
+        }
+        if ( $og_img ) {
+            echo '<meta name="twitter:image" content="' . esc_url( $og_img ) . '">' . "\n";
+        }
     }
 
     /**
-     * SEO Engine: JSON-LD Schema
+     * Bespoke SEO Engine: JSON-LD Schema
      */
     public function inject_seo_schema() {
+        $options = get_option( 'gw_perf_settings', array() );
         $schema = array();
         if ( is_front_page() ) {
+            $schema_type = ! empty( $options['schema_type'] ) ? $options['schema_type'] : 'LocalBusiness';
+            $biz_name    = ! empty( $options['business_name'] ) ? $options['business_name'] : get_bloginfo( 'name' );
+            $telephone   = ! empty( $options['telephone'] ) ? $options['telephone'] : get_theme_mod( 'footer_phone_display', '' );
+
+            $logo_url = '';
+            if ( has_custom_logo() ) {
+                $logo_url = wp_get_attachment_image_url( get_theme_mod( 'custom_logo' ), 'full' );
+            } elseif ( get_site_icon_url() ) {
+                $logo_url = get_site_icon_url();
+            }
+
             $schema = array(
                 '@context' => 'https://schema.org',
-                '@type'    => 'LocalBusiness',
-                'name'     => get_bloginfo( 'name' ),
-                'image'    => get_site_icon_url(),
-                '@id'       => home_url( '/' ),
-                'url'       => home_url( '/' ),
-                'telephone' => get_theme_mod( 'footer_phone_display', '+44 7970 262 387' ),
-                'address'   => array(
-                    '@type'           => 'PostalAddress',
-                    'streetAddress'   => '63 Twineham Road',
-                    'addressLocality' => 'Swindon',
-                    'postalCode'      => 'SN25 2AG',
-                    'addressCountry'  => 'GB'
-                )
+                '@type'    => $schema_type,
+                'name'     => $biz_name,
+                '@id'      => home_url( '/' ),
+                'url'      => home_url( '/' ),
             );
+            if ( $logo_url ) {
+                $schema['image'] = $logo_url;
+            }
+            if ( $telephone ) {
+                $schema['telephone'] = $telephone;
+            }
+
+            $street   = ! empty( $options['street_address'] ) ? $options['street_address'] : '';
+            $city     = ! empty( $options['locality'] ) ? $options['locality'] : '';
+            $postcode = ! empty( $options['postal_code'] ) ? $options['postal_code'] : '';
+            $country  = ! empty( $options['country'] ) ? $options['country'] : 'GB';
+
+            if ( $street || $postcode || $city ) {
+                $addr = array( '@type' => 'PostalAddress' );
+                if ( $street )   $addr['streetAddress']   = $street;
+                if ( $city )     $addr['addressLocality'] = $city;
+                if ( $postcode ) $addr['postalCode']      = $postcode;
+                if ( $country )  $addr['addressCountry']  = $country;
+                $schema['address'] = $addr;
+            }
+
+            if ( ! empty( $options['social_profiles'] ) && is_array( $options['social_profiles'] ) ) {
+                $schema['sameAs'] = array_values( array_filter( $options['social_profiles'] ) );
+            }
+        } elseif ( is_singular( 'post' ) ) {
+            $schema = array(
+                '@context' => 'https://schema.org',
+                '@type'    => 'Article',
+                'headline' => get_the_title(),
+                'datePublished' => get_the_date( 'c' ),
+                'dateModified'  => get_the_modified_date( 'c' ),
+                'mainEntityOfPage' => get_permalink(),
+                'author' => array(
+                    '@type' => 'Person',
+                    'name'  => get_the_author(),
+                ),
+            );
+            if ( has_post_thumbnail() ) {
+                $schema['image'] = get_the_post_thumbnail_url( null, 'large' );
+            }
         }
+
         if ( is_page_template( 'page-faq.php' ) ) {
             $post = get_post();
             if ( preg_match_all( '/<h3[^>]*>(.*?)<\/h3>\s*<p[^>]*>(.*?)<\/p>/si', $post->post_content, $matches ) ) {
@@ -230,17 +338,124 @@ class GW_Performance_Engine {
                     );
                 }
                 if ( ! empty( $questions ) ) {
-                    $schema = array(
+                    $faq_schema = array(
                         '@context' => 'https://schema.org',
                         '@type'    => 'FAQPage',
                         'mainEntity' => $questions
                     );
+                    echo '<script type="application/ld+json">' . json_encode( $faq_schema, JSON_UNESCAPED_SLASHES | JSON_PRETTY_PRINT ) . '</script>' . "\n";
                 }
             }
         }
         if ( ! empty( $schema ) ) {
             echo '<script type="application/ld+json">' . json_encode( $schema, JSON_UNESCAPED_SLASHES | JSON_PRETTY_PRINT ) . '</script>' . "\n";
         }
+    }
+
+    /**
+     * Bespoke SEO: Document Title Filter
+     */
+    public function filter_seo_title( $title ) {
+        if ( is_singular() ) {
+            $post_id = get_the_ID();
+            $custom_title = get_post_meta( $post_id, '_gw_seo_title', true );
+            if ( ! empty( $custom_title ) ) {
+                return $custom_title;
+            }
+        } elseif ( is_front_page() && 'page' === get_option( 'show_on_front' ) ) {
+            $front_id = get_option( 'page_on_front' );
+            $custom_title = get_post_meta( $front_id, '_gw_seo_title', true );
+            if ( ! empty( $custom_title ) ) {
+                return $custom_title;
+            }
+        }
+        return $title;
+    }
+
+    /**
+     * Bespoke SEO: Meta Box for Page/Post Editor
+     */
+    public function add_seo_meta_box() {
+        $post_types = get_post_types( array( 'public' => true ), 'names' );
+        foreach ( $post_types as $post_type ) {
+            add_meta_box(
+                'gw_seo_meta_box',
+                'GW Bespoke SEO & Social',
+                array( $this, 'render_seo_meta_box' ),
+                $post_type,
+                'normal',
+                'high'
+            );
+        }
+    }
+
+    public function render_seo_meta_box( $post ) {
+        wp_nonce_field( 'gw_seo_save_meta', 'gw_seo_meta_nonce' );
+        $title     = get_post_meta( $post->ID, '_gw_seo_title', true );
+        $desc      = get_post_meta( $post->ID, '_gw_seo_description', true );
+        $canonical = get_post_meta( $post->ID, '_gw_seo_canonical', true );
+        $noindex   = get_post_meta( $post->ID, '_gw_seo_noindex', true );
+        ?>
+        <style>
+            .gw-seo-box { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Oxygen-Sans, Ubuntu, Cantarell, "Helvetica Neue", sans-serif; }
+            .gw-seo-field { margin-bottom: 15px; }
+            .gw-seo-field label { display: block; font-weight: 600; margin-bottom: 5px; color: #1d2327; }
+            .gw-seo-field input[type="text"], .gw-seo-field textarea { width: 100%; border: 1px solid #8c8f94; border-radius: 4px; padding: 6px 8px; box-sizing: border-box; }
+            .gw-seo-field textarea { min-height: 70px; }
+            .gw-seo-hint { font-size: 12px; color: #646970; margin-top: 4px; margin-bottom: 0; }
+            .gw-seo-preview { background: #f6f7f7; border: 1px solid #dcdcde; border-radius: 4px; padding: 12px; margin-top: 15px; }
+            .gw-seo-preview-title { font-size: 18px; color: #1a0dab; line-height: 1.3; text-decoration: none; display: block; margin-bottom: 3px; font-weight: 400; }
+            .gw-seo-preview-url { font-size: 13px; color: #006621; line-height: 1.3; margin-bottom: 4px; }
+            .gw-seo-preview-desc { font-size: 13px; color: #4d5156; line-height: 1.4; }
+        </style>
+        <div class="gw-seo-box">
+            <div class="gw-seo-field">
+                <label for="gw_seo_title">SEO Title (Overrides document title)</label>
+                <input type="text" id="gw_seo_title" name="gw_seo_title" value="<?php echo esc_attr( $title ); ?>" placeholder="<?php echo esc_attr( get_the_title( $post ) ); ?>" maxlength="100" />
+                <p class="gw-seo-hint">Recommended: 50–60 characters.</p>
+            </div>
+            <div class="gw-seo-field">
+                <label for="gw_seo_description">Meta Description</label>
+                <textarea id="gw_seo_description" name="gw_seo_description" maxlength="300"><?php echo esc_textarea( $desc ); ?></textarea>
+                <p class="gw-seo-hint">Recommended: 120–160 characters. Search snippet for Google and social previews.</p>
+            </div>
+            <div class="gw-seo-field">
+                <label for="gw_seo_canonical">Canonical URL (Optional override)</label>
+                <input type="text" id="gw_seo_canonical" name="gw_seo_canonical" value="<?php echo esc_attr( $canonical ); ?>" placeholder="<?php echo esc_url( get_permalink( $post ) ); ?>" />
+            </div>
+            <div class="gw-seo-field">
+                <label>
+                    <input type="checkbox" name="gw_seo_noindex" value="1" <?php checked( $noindex, '1' ); ?> />
+                    Prevent search engines from indexing this page (noindex)
+                </label>
+            </div>
+            <div class="gw-seo-preview">
+                <strong style="font-size: 11px; color: #50575e; text-transform: uppercase; letter-spacing: 0.5px; display: block; margin-bottom: 6px;">Google Search Preview</strong>
+                <span class="gw-seo-preview-title"><?php echo esc_html( $title ? $title : get_the_title( $post ) . ' - ' . get_bloginfo( 'name' ) ); ?></span>
+                <div class="gw-seo-preview-url"><?php echo esc_url( $canonical ? $canonical : get_permalink( $post ) ); ?></div>
+                <div class="gw-seo-preview-desc"><?php echo esc_html( $desc ? $desc : ( has_excerpt( $post ) ? get_the_excerpt( $post ) : get_bloginfo( 'description' ) ) ); ?></div>
+            </div>
+        </div>
+        <?php
+    }
+
+    public function save_seo_meta_box( $post_id ) {
+        if ( ! isset( $_POST['gw_seo_meta_nonce'] ) || ! wp_verify_nonce( $_POST['gw_seo_meta_nonce'], 'gw_seo_save_meta' ) ) {
+            return;
+        }
+        if ( defined( 'DOING_AUTOSAVE' ) && DOING_AUTOSAVE ) return;
+        if ( ! current_user_can( 'edit_post', $post_id ) ) return;
+
+        if ( isset( $_POST['gw_seo_title'] ) ) {
+            update_post_meta( $post_id, '_gw_seo_title', sanitize_text_field( wp_unslash( $_POST['gw_seo_title'] ) ) );
+        }
+        if ( isset( $_POST['gw_seo_description'] ) ) {
+            update_post_meta( $post_id, '_gw_seo_description', sanitize_textarea_field( wp_unslash( $_POST['gw_seo_description'] ) ) );
+        }
+        if ( isset( $_POST['gw_seo_canonical'] ) ) {
+            update_post_meta( $post_id, '_gw_seo_canonical', esc_url_raw( wp_unslash( $_POST['gw_seo_canonical'] ) ) );
+        }
+        update_post_meta( $post_id, '_gw_seo_noindex', ! empty( $_POST['gw_seo_noindex'] ) ? '1' : '0' );
     }
 
 
@@ -372,10 +587,11 @@ class GW_Performance_Engine {
     public function anchor_image_dimensions( $content ) {
         if ( ! $content ) return $content;
 
-        // Regex to find images and check for width/height/alt
+        // Regex to find images and check for width/height
         $content = preg_replace_callback( '/<img[^>]+>/i', function( $match ) {
             $img = $match[0];
             
+            // If already has both, leave it
             // If missing width or height, attempt recovery
             if ( strpos( $img, 'width=' ) === false || strpos( $img, 'height=' ) === false ) {
                 $w = null;
@@ -405,13 +621,13 @@ class GW_Performance_Engine {
 
             // Ensure alt attribute is present and non-empty
             if ( ! preg_match( '/alt=["\']([^"\']+)["\']/i', $img ) ) {
+                $fallback_alt = esc_attr( get_bloginfo( 'name' ) );
                 if ( preg_match( '/alt=["\']\s*["\']/i', $img ) ) {
-                    $img = preg_replace( '/alt=["\']\s*["\']/i', 'alt="Gary Wallage Photography"', $img );
+                    $img = preg_replace( '/alt=["\']\s*["\']/i', 'alt="' . $fallback_alt . '"', $img );
                 } else {
-                    $img = str_replace( '<img', '<img alt="Gary Wallage Photography"', $img );
+                    $img = str_replace( '<img', '<img alt="' . $fallback_alt . '"', $img );
                 }
             }
-
             return $img;
         }, $content );
 
@@ -420,7 +636,7 @@ class GW_Performance_Engine {
 
     /**
      * Ensures all images have Alt tags for SEO and Accessibility.
-     * Uses the attachment title, parent post title, or page title as a fallback.
+     * Uses the attachment title or page title as a fallback.
      */
     public function ensure_image_alt_tags( $attr, $attachment ) {
         $alt = isset( $attr['alt'] ) ? trim( (string) $attr['alt'] ) : '';
@@ -433,7 +649,7 @@ class GW_Performance_Engine {
                 $alt = get_the_title();
             }
             if ( empty( $alt ) ) {
-                $alt = 'Gary Wallage Photography';
+                $alt = get_bloginfo( 'name' );
             }
             $attr['alt'] = esc_attr( $alt );
         }
@@ -497,7 +713,7 @@ class GW_Performance_Engine {
         wp_dequeue_script( 'lr-wp-bridge-js' );
         wp_dequeue_style( 'lr-wp-bridge-css' );
 
-        // Dequeue unused Bookly assets on homepage (eliminates ~194 KiB JS and ~102 KiB CSS)
+        // Dequeue unused Bookly / WooCommerce assets on homepage if present
         if ( is_front_page() ) {
             $unused_frontpage_styles = array(
                 'bookly-backend-globals',
@@ -539,10 +755,14 @@ class GW_Performance_Engine {
                 'sourcebuster-js',
                 'wc-order-attribution',
                 'woocommerce-analytics-client',
-                'jquery',
-                'jquery-core',
-                'jquery-migrate',
             );
+            // Dequeue jQuery on homepage only for Gary's bespoke themes (pure vanilla JS), never on third-party themes
+            $options = get_option( 'gw_perf_settings' );
+            if ( get_template() === 'gary-wedding-pro' || ! empty( $options['dequeue_homepage_jquery'] ) ) {
+                $unused_frontpage_scripts[] = 'jquery';
+                $unused_frontpage_scripts[] = 'jquery-core';
+                $unused_frontpage_scripts[] = 'jquery-migrate';
+            }
             foreach ( $unused_frontpage_scripts as $handle ) {
                 wp_dequeue_script( $handle );
                 wp_deregister_script( $handle );
@@ -558,44 +778,268 @@ class GW_Performance_Engine {
     }
 
     public function register_settings() {
-        register_setting( 'gw_perf_settings_group', 'gw_perf_settings' );
+        register_setting( 'gw_perf_settings_group', 'gw_perf_settings', array( $this, 'sanitize_perf_settings' ) );
+    }
+
+    public function sanitize_perf_settings( $input ) {
+        $output = array();
+        $output['ga4_id'] = isset( $input['ga4_id'] ) ? sanitize_text_field( $input['ga4_id'] ) : '';
+        $output['gsc_id'] = isset( $input['gsc_id'] ) ? sanitize_text_field( $input['gsc_id'] ) : '';
+        $output['business_name'] = isset( $input['business_name'] ) ? sanitize_text_field( $input['business_name'] ) : '';
+        $output['schema_type'] = isset( $input['schema_type'] ) ? sanitize_text_field( $input['schema_type'] ) : 'LocalBusiness';
+        $output['telephone'] = isset( $input['telephone'] ) ? sanitize_text_field( $input['telephone'] ) : '';
+        $output['street_address'] = isset( $input['street_address'] ) ? sanitize_text_field( $input['street_address'] ) : '';
+        $output['locality'] = isset( $input['locality'] ) ? sanitize_text_field( $input['locality'] ) : '';
+        $output['postal_code'] = isset( $input['postal_code'] ) ? sanitize_text_field( $input['postal_code'] ) : '';
+        $output['country'] = isset( $input['country'] ) ? sanitize_text_field( $input['country'] ) : 'GB';
+        $output['default_og_image'] = isset( $input['default_og_image'] ) ? esc_url_raw( $input['default_og_image'] ) : '';
+        if ( ! empty( $input['social_profiles_raw'] ) ) {
+            $lines = explode( "\n", str_replace( "\r", '', $input['social_profiles_raw'] ) );
+            $clean_lines = array();
+            foreach ( $lines as $line ) {
+                $trimmed = trim( $line );
+                if ( $trimmed ) {
+                    $clean_lines[] = esc_url_raw( $trimmed );
+                }
+            }
+            $output['social_profiles'] = $clean_lines;
+            $output['social_profiles_raw'] = implode( "\n", $clean_lines );
+        } else {
+            $output['social_profiles'] = array();
+            $output['social_profiles_raw'] = '';
+        }
+        return $output;
     }
 
     public function render_settings_page() {
-        $options = get_option( 'gw_perf_settings' );
+        $options = get_option( 'gw_perf_settings', array() );
+        global $wpdb;
+        $aioseo_table = $wpdb->prefix . 'aioseo_posts';
+        $has_aioseo_table = (bool) $wpdb->get_var( $wpdb->prepare( "SHOW TABLES LIKE %s", $aioseo_table ) );
+        $aioseo_post_count = $has_aioseo_table ? (int) $wpdb->get_var( "SELECT COUNT(*) FROM {$aioseo_table} WHERE (description IS NOT NULL AND description != '') OR (title IS NOT NULL AND title != '')" ) : 0;
         ?>
         <div class="wrap">
-            <h1>Industrial Performance Settings</h1>
+            <h1>GW Industrial Performance & Bespoke SEO Settings</h1>
+
+            <?php if ( isset( $_GET['aioseo_transferred'] ) ) : ?>
+                <div class="notice notice-success is-dismissible">
+                    <p><strong>Success:</strong> Successfully transferred <strong><?php echo (int) $_GET['aioseo_transferred']; ?></strong> posts/pages and global metadata from All In One SEO to GW Bespoke SEO!</p>
+                </div>
+            <?php endif; ?>
+
             <div class="notice notice-info" style="border-left-color: #C5A059;">
-                <p><strong>Industrial Guide:</strong> This plugin replaces Google Site Kit and Jetpack Boost with zero-overhead code.</p>
-                <ul>
-                    <li><strong>GA4 ID:</strong> Find this in Google Analytics under <em>Admin > Data Streams > [Your Stream]</em>. It starts with <strong>G-</strong>.</li>
-                    <li><strong>Search Console ID:</strong> Paste only the <code>content="..."</code> value from your Google HTML meta tag.</li>
-                    <li><strong>Performance:</strong> All legacy tracking bloat has been removed. These keys are injected using high-priority, lightweight scripts.</li>
-                </ul>
+                <p><strong>GW Industrial Performance & SEO Engine:</strong> Replaces bloated SEO plugins (AIOSEO, Yoast) and tracking plugins (Site Kit, Jetpack Boost) with zero-overhead, ultra-fast code.</p>
             </div>
+
             <form method="post" action="options.php">
                 <?php settings_fields( 'gw_perf_settings_group' ); ?>
+                
+                <h2>1. Lightweight Analytics & Webmaster Tools</h2>
                 <table class="form-table">
                     <tr>
                         <th scope="row">GA4 Measurement ID</th>
                         <td>
                             <input type="text" name="gw_perf_settings[ga4_id]" value="<?php echo esc_attr( $options['ga4_id'] ?? '' ); ?>" placeholder="G-XXXXXXXXXX" class="regular-text" />
-                            <p class="description">Your Google Analytics 4 ID.</p>
+                            <p class="description">Your Google Analytics 4 Measurement ID.</p>
                         </td>
                     </tr>
                     <tr>
                         <th scope="row">Search Console ID</th>
                         <td>
                             <input type="text" name="gw_perf_settings[gsc_id]" value="<?php echo esc_attr( $options['gsc_id'] ?? '' ); ?>" placeholder="Verification Content String" class="regular-text" />
-                            <p class="description">The 'content' value from your GSC meta tag.</p>
+                            <p class="description">The 'content' value from your Google Search Console HTML verification tag.</p>
                         </td>
                     </tr>
                 </table>
-                <?php submit_button(); ?>
+
+                <h2>2. Bespoke Business Schema (JSON-LD) & Social Sharing</h2>
+                <table class="form-table">
+                    <tr>
+                        <th scope="row">Business / Organization Name</th>
+                        <td>
+                            <input type="text" name="gw_perf_settings[business_name]" value="<?php echo esc_attr( $options['business_name'] ?? get_bloginfo( 'name' ) ); ?>" class="regular-text" />
+                            <p class="description">Defaults to site title if blank.</p>
+                        </td>
+                    </tr>
+                    <tr>
+                        <th scope="row">Schema Type</th>
+                        <td>
+                            <?php $current_type = $options['schema_type'] ?? 'LocalBusiness'; ?>
+                            <select name="gw_perf_settings[schema_type]">
+                                <option value="LocalBusiness" <?php selected( $current_type, 'LocalBusiness' ); ?>>LocalBusiness</option>
+                                <option value="ProfessionalService" <?php selected( $current_type, 'ProfessionalService' ); ?>>ProfessionalService</option>
+                                <option value="Organization" <?php selected( $current_type, 'Organization' ); ?>>Organization</option>
+                                <option value="HealthAndBeautyBusiness" <?php selected( $current_type, 'HealthAndBeautyBusiness' ); ?>>HealthAndBeautyBusiness</option>
+                                <option value="Photographer" <?php selected( $current_type, 'Photographer' ); ?>>Photographer</option>
+                            </select>
+                        </td>
+                    </tr>
+                    <tr>
+                        <th scope="row">Telephone</th>
+                        <td>
+                            <input type="text" name="gw_perf_settings[telephone]" value="<?php echo esc_attr( $options['telephone'] ?? '' ); ?>" placeholder="+44 7..." class="regular-text" />
+                        </td>
+                    </tr>
+                    <tr>
+                        <th scope="row">Street Address</th>
+                        <td>
+                            <input type="text" name="gw_perf_settings[street_address]" value="<?php echo esc_attr( $options['street_address'] ?? '' ); ?>" class="regular-text" />
+                        </td>
+                    </tr>
+                    <tr>
+                        <th scope="row">Locality (City / Town)</th>
+                        <td>
+                            <input type="text" name="gw_perf_settings[locality]" value="<?php echo esc_attr( $options['locality'] ?? '' ); ?>" placeholder="Swindon" class="regular-text" />
+                        </td>
+                    </tr>
+                    <tr>
+                        <th scope="row">Postal Code</th>
+                        <td>
+                            <input type="text" name="gw_perf_settings[postal_code]" value="<?php echo esc_attr( $options['postal_code'] ?? '' ); ?>" placeholder="SN25..." class="regular-text" />
+                        </td>
+                    </tr>
+                    <tr>
+                        <th scope="row">Country Code</th>
+                        <td>
+                            <input type="text" name="gw_perf_settings[country]" value="<?php echo esc_attr( $options['country'] ?? 'GB' ); ?>" placeholder="GB" style="width: 80px;" />
+                        </td>
+                    </tr>
+                    <tr>
+                        <th scope="row">Default Social Share Image URL</th>
+                        <td>
+                            <input type="text" name="gw_perf_settings[default_og_image]" value="<?php echo esc_attr( $options['default_og_image'] ?? '' ); ?>" placeholder="https://.../og-image.jpg" class="regular-text" />
+                            <p class="description">Fallback OpenGraph / Twitter card image when a page lacks a featured image.</p>
+                        </td>
+                    </tr>
+                    <tr>
+                        <th scope="row">Social Profile URLs (sameAs)</th>
+                        <td>
+                            <textarea name="gw_perf_settings[social_profiles_raw]" rows="4" cols="50" class="large-text"><?php echo esc_textarea( $options['social_profiles_raw'] ?? ( ! empty( $options['social_profiles'] ) ? implode( "\n", $options['social_profiles'] ) : '' ) ); ?></textarea>
+                            <p class="description">Enter one profile URL per line (Facebook, Instagram, LinkedIn, Twitter/X, etc.).</p>
+                        </td>
+                    </tr>
+                </table>
+
+                <?php submit_button( 'Save Performance & SEO Settings' ); ?>
             </form>
+
+            <?php if ( $has_aioseo_table && $aioseo_post_count > 0 ) : ?>
+                <hr style="margin-top: 30px;" />
+                <h2>3. SEO Data Migration Tool</h2>
+                <div class="card" style="max-width: 800px; padding: 15px 20px; border-left: 4px solid #2271b1;">
+                    <h3>Transfer Data from All in One SEO to GW Bespoke SEO</h3>
+                    <p>Detected <strong><?php echo $aioseo_post_count; ?></strong> custom SEO entries in the All In One SEO table (<code><?php echo esc_html( $aioseo_table ); ?></code>).</p>
+                    <p>Clicking the button below will migrate all custom SEO titles, meta descriptions, canonical URLs, and noindex flags into WordPress post metadata (<code>_gw_seo_*</code>) and import your GSC ID, social links, and Organization name into GW settings above. Once transferred, you can safely deactivate All In One SEO.</p>
+                    <form method="post" action="<?php echo esc_url( admin_url( 'admin-post.php' ) ); ?>">
+                        <?php wp_nonce_field( 'gw_transfer_aioseo_action' ); ?>
+                        <input type="hidden" name="action" value="gw_transfer_aioseo" />
+                        <?php submit_button( 'Transfer All SEO Data to GW Performance', 'secondary', 'submit', false ); ?>
+                    </form>
+                </div>
+            <?php endif; ?>
         </div>
         <?php
+    }
+
+    /**
+     * Admin POST handler for AIOSEO migration
+     */
+    public function handle_transfer_aioseo() {
+        if ( ! current_user_can( 'manage_options' ) ) {
+            wp_die( 'Unauthorized' );
+        }
+        check_admin_referer( 'gw_transfer_aioseo_action' );
+        $count = self::transfer_aioseo_data();
+        wp_safe_redirect( add_query_arg( array( 'page' => 'gw-perf-settings', 'aioseo_transferred' => $count ), admin_url( 'options-general.php' ) ) );
+        exit;
+    }
+
+    /**
+     * One-Click SEO Data Migration from All in One SEO to GW Bespoke SEO
+     */
+    public static function transfer_aioseo_data() {
+        global $wpdb;
+        $table = $wpdb->prefix . 'aioseo_posts';
+        $count = 0;
+
+        // 1. Transfer global options if present
+        $aioseo_options = get_option( 'aioseo_options' );
+        if ( ! empty( $aioseo_options ) && is_string( $aioseo_options ) ) {
+            $opt = json_decode( $aioseo_options, true );
+            $gw_opts = get_option( 'gw_perf_settings', array() );
+            if ( ! is_array( $gw_opts ) ) $gw_opts = array();
+
+            if ( ! empty( $opt['webmasterTools']['google'] ) && empty( $gw_opts['gsc_id'] ) ) {
+                $gw_opts['gsc_id'] = sanitize_text_field( $opt['webmasterTools']['google'] );
+            }
+            if ( ! empty( $opt['searchAppearance']['global']['schema']['organizationName'] ) && empty( $gw_opts['business_name'] ) ) {
+                $gw_opts['business_name'] = sanitize_text_field( $opt['searchAppearance']['global']['schema']['organizationName'] );
+            }
+            if ( ! empty( $opt['social']['urls'] ) ) {
+                $urls = array_filter( array_values( $opt['social']['urls'] ) );
+                $gw_opts['social_profiles'] = array_map( 'esc_url_raw', $urls );
+                $gw_opts['social_profiles_raw'] = implode( "\n", $gw_opts['social_profiles'] );
+            }
+            if ( ! empty( $opt['social']['facebook']['general']['defaultImagePosts'] ) && empty( $gw_opts['default_og_image'] ) ) {
+                $gw_opts['default_og_image'] = esc_url_raw( $opt['social']['facebook']['general']['defaultImagePosts'] );
+            }
+            update_option( 'gw_perf_settings', $gw_opts );
+        }
+
+        // 2. Check table exists
+        $table_exists = $wpdb->get_var( $wpdb->prepare( "SHOW TABLES LIKE %s", $table ) );
+        if ( ! $table_exists ) {
+            return 0;
+        }
+
+        $rows = $wpdb->get_results( "SELECT post_id, title, description, canonical_url, robots_noindex FROM {$table} WHERE (description IS NOT NULL AND description != '') OR (title IS NOT NULL AND title != '')" );
+        if ( empty( $rows ) ) {
+            return 0;
+        }
+
+        foreach ( $rows as $r ) {
+            $post_id = (int) $r->post_id;
+            if ( ! $post_id ) continue;
+
+            $updated_post = false;
+
+            // Description
+            if ( ! empty( $r->description ) && strpos( $r->description, '#post_content' ) === false ) {
+                $clean_desc = trim( html_entity_decode( (string) $r->description, ENT_QUOTES, 'UTF-8' ) );
+                if ( $clean_desc ) {
+                    update_post_meta( $post_id, '_gw_seo_description', $clean_desc );
+                    $updated_post = true;
+                }
+            }
+
+            // Title
+            if ( ! empty( $r->title ) && $r->title !== '#post_title' && $r->title !== '#post_title #separator_sa #site_title' ) {
+                $clean_title = str_replace( array( '#separator_sa', '#site_title', '#post_title' ), array( '|', get_bloginfo( 'name' ), get_the_title( $post_id ) ), (string) $r->title );
+                $clean_title = trim( preg_replace( '/\s+/', ' ', $clean_title ) );
+                if ( $clean_title ) {
+                    update_post_meta( $post_id, '_gw_seo_title', $clean_title );
+                    $updated_post = true;
+                }
+            }
+
+            // Canonical
+            if ( ! empty( $r->canonical_url ) ) {
+                update_post_meta( $post_id, '_gw_seo_canonical', esc_url_raw( $r->canonical_url ) );
+                $updated_post = true;
+            }
+
+            // Robots Noindex
+            if ( ! empty( $r->robots_noindex ) ) {
+                update_post_meta( $post_id, '_gw_seo_noindex', '1' );
+                $updated_post = true;
+            }
+
+            if ( $updated_post ) {
+                $count++;
+            }
+        }
+
+        return $count;
     }
 
     /**
