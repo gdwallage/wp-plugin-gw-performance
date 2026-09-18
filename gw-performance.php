@@ -43,7 +43,7 @@ class GW_Performance_Engine {
         add_filter( 'the_content', array( $this, 'optimize_embed_facades' ), 20 );
 
         // 9. Unload Sync Bloat
-        add_action( 'wp_enqueue_scripts', array( $this, 'unload_sync_bloat' ), 99 );
+        add_action( 'wp_enqueue_scripts', array( $this, 'unload_sync_bloat' ), 1000 );
 
         // 10. Attachment Page Nullifier & bfcache Optimizer
         add_action( 'template_redirect', array( $this, 'redirect_attachment_pages' ), 1 );
